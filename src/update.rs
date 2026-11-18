@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::command::{self, Parsed};
 use crate::domain::Op;
 use crate::message::Message;
-use crate::model::{Mode, Model};
+use crate::model::{DETAIL_SIDE_BY_SIDE_WIDTH, Mode, Model};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
@@ -130,6 +130,12 @@ pub(crate) fn update(model: &mut Model, message: Message) -> Effect {
             }
             Effect::None
         }
+        Message::ShowSankey => {
+            if model.mode == Mode::Normal {
+                model.mode = Mode::Sankey;
+            }
+            Effect::None
+        }
         Message::Loaded {
             snapshot,
             status,
@@ -178,7 +184,7 @@ fn open_detail(model: &mut Model, width: u16) {
         model.status_error = true;
         return;
     }
-    if width < 100 {
+    if width < DETAIL_SIDE_BY_SIDE_WIDTH {
         model.show_detail = true;
     }
 }
@@ -191,7 +197,7 @@ fn escape(model: &mut Model) {
             model.status = "cancelled".into();
             model.status_error = false;
         }
-        Mode::StagePick | Mode::Help => {
+        Mode::StagePick | Mode::Help | Mode::Sankey => {
             model.mode = Mode::Normal;
         }
         Mode::Normal => {
@@ -278,8 +284,7 @@ fn prompt_delete(model: &mut Model) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Application, Snapshot, Stage, StageEvent};
-    use crate::message::Message;
+    use crate::domain::{Application, ApplicationId, EventId, Snapshot, Stage, StageEvent};
     use jiff::civil::Date;
 
     fn today() -> Date {
@@ -288,11 +293,11 @@ mod tests {
 
     fn application(id: i64, company: &str, stage: Stage, on: Date) -> Application {
         Application::new(
-            id,
+            ApplicationId::new(id),
             company.into(),
             "Role".into(),
             vec![StageEvent {
-                id,
+                id: EventId::new(id),
                 stage,
                 occurred_on: on,
             }],
@@ -340,6 +345,19 @@ mod tests {
     }
 
     #[test]
+    fn sankey_opens_from_the_list_and_escape_closes_it() {
+        let mut model = model_with(vec![]);
+        assert_eq!(update(&mut model, Message::ShowSankey), Effect::None);
+        assert_eq!(model.mode, Mode::Sankey);
+        assert_eq!(update(&mut model, Message::Escape), Effect::None);
+        assert_eq!(model.mode, Mode::Normal);
+
+        update(&mut model, Message::BeginCommand("add ".into()));
+        assert_eq!(update(&mut model, Message::ShowSankey), Effect::None);
+        assert_eq!(model.mode, Mode::Command);
+    }
+
+    #[test]
     fn help_and_quit_change_mode_without_a_store() {
         let mut model = model_with(vec![]);
         assert_eq!(update(&mut model, Message::ShowHelp), Effect::None);
@@ -365,7 +383,7 @@ mod tests {
         assert_eq!(
             effect,
             Effect::Apply(Op::SetStage {
-                application_id: 4,
+                application_id: ApplicationId::new(4),
                 stage: Stage::TechnicalMeeting,
                 on: today(),
             })
@@ -380,7 +398,12 @@ mod tests {
         assert_eq!(model.mode, Mode::Command);
         assert_eq!(model.command.buffer, "delete 3 ");
         let effect = update(&mut model, Message::SubmitCommand { today: today() });
-        assert_eq!(effect, Effect::Apply(Op::Delete { application_id: 3 }));
+        assert_eq!(
+            effect,
+            Effect::Apply(Op::Delete {
+                application_id: ApplicationId::new(3)
+            })
+        );
     }
 
     #[test]
@@ -407,11 +430,11 @@ mod tests {
             Message::Loaded {
                 snapshot,
                 status: "wrote application 2".into(),
-                focus: Some(2),
+                focus: Some(ApplicationId::new(2)),
             },
         );
         assert_eq!(model.apps.len(), 2);
-        assert_eq!(model.selected_id(), Some(2));
+        assert_eq!(model.selected_id(), Some(ApplicationId::new(2)));
         assert!(!model.status_error);
     }
 
@@ -426,19 +449,19 @@ mod tests {
                 Date::new(2026, 11, 2).unwrap(),
             ),
         ]);
-        model.select_id(1);
+        model.select_id(ApplicationId::new(1));
         update(&mut model, Message::BeginCommand("filter all".into()));
         assert_eq!(
             update(&mut model, Message::SubmitCommand { today: today() }),
             Effect::None
         );
         assert_eq!(model.filter, crate::domain::Filter::All);
-        assert_eq!(model.selected_id(), Some(1));
+        assert_eq!(model.selected_id(), Some(ApplicationId::new(1)));
         assert_eq!(model.mode, Mode::Normal);
 
         update(&mut model, Message::CycleSort);
         assert_eq!(model.sort, crate::domain::Sort::Company);
-        assert_eq!(model.selected_id(), Some(1));
+        assert_eq!(model.selected_id(), Some(ApplicationId::new(1)));
         assert_eq!(model.status, "sort: company");
     }
 

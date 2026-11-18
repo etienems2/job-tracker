@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use jiff::civil::Date;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::domain::{Op, Snapshot};
+use crate::domain::{Application, ApplicationId, EventId, Op, Snapshot};
 use crate::message::Message;
 use crate::model::{Mode, Model};
-use crate::store::{SqliteStore, Store};
+use crate::store::{SqliteStore, Store, StoreError};
 use crate::update::{Effect, update};
 
 pub(crate) fn run(
@@ -56,6 +56,7 @@ fn map_key(key: KeyEvent, mode: Mode, today: Date, width: u16) -> Option<Message
         Mode::Command => map_command(key.code, today),
         Mode::StagePick => map_pick(key.code, today),
         Mode::Help => map_help(key.code),
+        Mode::Sankey => map_sankey(key.code),
     }
 }
 
@@ -79,6 +80,7 @@ fn map_normal(code: KeyCode, width: u16) -> Option<Message> {
         KeyCode::Char('o') => Message::CycleSort,
         KeyCode::Char(':') => Message::BeginCommand(String::new()),
         KeyCode::Char('?') => Message::ShowHelp,
+        KeyCode::Char('g') => Message::ShowSankey,
         _ => return None,
     })
 }
@@ -148,6 +150,14 @@ fn map_help(code: KeyCode) -> Option<Message> {
     }
 }
 
+fn map_sankey(code: KeyCode) -> Option<Message> {
+    match code {
+        KeyCode::Esc => Some(Message::Escape),
+        KeyCode::Char('q') => Some(Message::Quit),
+        _ => None,
+    }
+}
+
 fn dispatch(model: &mut Model, store: &mut SqliteStore, effect: Effect) {
     match effect {
         Effect::None | Effect::Quit => {}
@@ -177,8 +187,8 @@ fn dispatch(model: &mut Model, store: &mut SqliteStore, effect: Effect) {
             Ok(message) => {
                 update(model, Message::Status(message));
             }
-            Err(message) => {
-                update(model, Message::Failed(message));
+            Err(error) => {
+                update(model, Message::Failed(error.to_string()));
             }
         },
     }
@@ -188,8 +198,8 @@ fn outcome(
     op: &Op,
     snapshot: &Snapshot,
     filter: &crate::domain::Filter,
-    previous_app: Option<i64>,
-) -> (String, Option<i64>) {
+    previous_app: Option<ApplicationId>,
+) -> (String, Option<ApplicationId>) {
     let focus = match op {
         Op::Add { .. } => snapshot.applications.iter().map(|app| app.id).max(),
         Op::SetStage { application_id, .. } | Op::Rename { application_id, .. } => {
@@ -200,7 +210,10 @@ fn outcome(
         Op::DeleteEvent { .. } => previous_app,
     };
     let mut status = match op {
-        Op::Add { .. } => format!("wrote application {}", focus.unwrap_or(0)),
+        Op::Add { .. } => format!(
+            "wrote application {}",
+            focus.unwrap_or(ApplicationId::new(0))
+        ),
         Op::SetStage { application_id, .. } => format!("wrote application {application_id}"),
         Op::Rename { application_id, .. } => format!("renamed application {application_id}"),
         Op::Delete { application_id } => format!("deleted application {application_id}"),
@@ -219,23 +232,23 @@ fn outcome(
     (status, focus)
 }
 
-fn application_id(apps: &[crate::domain::Application], event_id: i64) -> Option<i64> {
+fn application_id(apps: &[Application], event_id: EventId) -> Option<ApplicationId> {
     apps.iter()
         .find(|app| app.events.iter().any(|event| event.id == event_id))
         .map(|app| app.id)
 }
 
-fn write_export(store: &SqliteStore, path: &Path) -> Result<String, String> {
-    let mut json = store.export_json().map_err(|error| error.to_string())?;
+fn write_export(store: &SqliteStore, path: &Path) -> Result<String, StoreError> {
+    let mut json = store.export_json()?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).map_err(|error| format!("export: {error}"))?;
+        std::fs::create_dir_all(parent)?;
     }
     if !json.ends_with('\n') {
         json.push('\n');
     }
-    std::fs::write(path, json).map_err(|error| format!("export: {error}"))?;
+    std::fs::write(path, json)?;
     Ok(format!("exported to {}", path.display()))
 }
 
@@ -243,8 +256,6 @@ fn write_export(store: &SqliteStore, path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::domain::Stage;
-    use crate::update::Effect;
-    use jiff::civil::Date;
 
     fn day(day: i8) -> Date {
         Date::new(2026, 11, day).unwrap()
@@ -275,7 +286,9 @@ mod tests {
         dispatch(
             &mut model,
             &mut store,
-            Effect::Apply(Op::Delete { application_id: 99 }),
+            Effect::Apply(Op::Delete {
+                application_id: ApplicationId::new(99),
+            }),
         );
         assert!(model.apps.is_empty());
         assert!(model.status_error);
@@ -286,6 +299,7 @@ mod tests {
     fn adding_a_closed_application_says_when_the_filter_hides_it() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         let mut model = Model::new(store.load().unwrap(), PathBuf::from("mem"));
+        model.filter = crate::domain::Filter::Active;
         dispatch(
             &mut model,
             &mut store,
@@ -387,6 +401,18 @@ mod tests {
                 stage: Stage::TechnicalMeeting,
                 today,
             })
+        );
+        assert_eq!(
+            map_event(press(KeyCode::Char('g')), Mode::Normal, today, 80),
+            Some(Message::ShowSankey)
+        );
+        assert_eq!(
+            map_event(press(KeyCode::Char('g')), Mode::Command, today, 80),
+            Some(Message::CommandInsert("g".into()))
+        );
+        assert_eq!(
+            map_event(press(KeyCode::Esc), Mode::Sankey, today, 80),
+            Some(Message::Escape)
         );
     }
 

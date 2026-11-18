@@ -9,7 +9,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::domain::{Application, Stage};
-use crate::model::{Mode, Model};
+use crate::model::{DETAIL_SIDE_BY_SIDE_WIDTH, Mode, Model};
+use crate::sankey::{self, Placement, PlacedNode, PlacedRibbon};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Field {
@@ -190,8 +191,12 @@ fn draw_body(frame: &mut Frame, model: &mut Model, area: Rect) {
         draw_help(frame, model, area);
         return;
     }
+    if model.mode == Mode::Sankey {
+        draw_sankey(frame, model, area);
+        return;
+    }
 
-    if area.width >= 100 {
+    if area.width >= DETAIL_SIDE_BY_SIDE_WIDTH {
         let [list, detail] =
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(36)]).areas(area);
         draw_table(frame, model, list);
@@ -304,7 +309,7 @@ fn help_text(path: &Path) -> Text<'static> {
         Line::from(format!("Database  {}", path.display())),
         Line::from(""),
         Line::from("j/k, up/down  move      n add           s set stage"),
-        Line::from("d delete       / filter       o cycle sort"),
+        Line::from("d delete       / filter       o cycle sort    g flow"),
         Line::from("Enter detail   : command      ? this help"),
         Line::from("q quit         Esc close      Ctrl-C quit"),
         Line::from(""),
@@ -319,9 +324,194 @@ fn help_text(path: &Path) -> Text<'static> {
         Line::from("Stages: applied, first_meeting, second_meeting,"),
         Line::from("third_meeting, technical_meeting, offer_made,"),
         Line::from("offer_accepted, refused. A unique prefix works."),
-        Line::from("Picker: a f s t c m o r, dated today. Empty filter is active."),
-        Line::from("The time graph is not drawn in this build."),
+        Line::from("Picker: a f s t c m o r, dated today. Empty filter is all."),
+        Line::from("g shows every application, ignoring the filter."),
     ])
+}
+
+fn draw_sankey(frame: &mut Frame, model: &Model, area: Rect) {
+    let flow = sankey::flow(&model.apps);
+    match sankey::layout(&flow, area.width, area.height) {
+        Placement::Empty => {
+            let block = Block::bordered().title("Flow");
+            frame.render_widget(
+                Paragraph::new("No applications yet. Press n to add one.").block(block),
+                area,
+            );
+        }
+        Placement::TooSmall => {
+            let block = Block::bordered().title("Flow");
+            frame.render_widget(
+                Paragraph::new("Terminal is too short to draw the flow.").block(block),
+                area,
+            );
+        }
+        Placement::Chart(chart) => {
+            let block = Block::bordered().title(chart.title.as_str());
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            if inner.width == 0 || inner.height == 0 {
+                return;
+            }
+            for ribbon in &chart.ribbons {
+                paint_ribbon(frame, inner, ribbon);
+            }
+            for node in &chart.nodes {
+                paint_node(frame, inner, node);
+            }
+            let footer_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+            frame
+                .buffer_mut()
+                .set_string(inner.x, footer_y, "Esc close", Style::new());
+        }
+    }
+}
+
+fn paint_node(frame: &mut Frame, inner: Rect, node: &PlacedNode) {
+    let style = Style::new().fg(stage_color(node.stage));
+    let origin_x = inner.x.saturating_add(node.x);
+    let origin_y = inner.y.saturating_add(node.y);
+    for row in 0..node.height {
+        let y = origin_y.saturating_add(row);
+        if y >= inner.bottom() || origin_x >= inner.right() {
+            continue;
+        }
+        frame.buffer_mut()[(origin_x, y)]
+            .set_symbol("█")
+            .set_style(style);
+    }
+    let label = node_label(
+        node.stage,
+        node.count,
+        usize::from(node.width.saturating_sub(1)),
+    );
+    let text_x = origin_x.saturating_add(1);
+    frame.buffer_mut().set_stringn(
+        text_x,
+        origin_y,
+        label,
+        usize::from(node.width.saturating_sub(1)),
+        style,
+    );
+}
+
+fn paint_ribbon(frame: &mut Frame, inner: Rect, ribbon: &PlacedRibbon) {
+    if ribbon.width == 0 || (ribbon.src_height == 0 && ribbon.dst_height == 0) {
+        return;
+    }
+    let style = Style::new().fg(stage_color(ribbon.stage));
+    let span = f64::from(ribbon.width);
+    let src_top = f64::from(ribbon.src_y);
+    let src_bottom = src_top + f64::from(ribbon.src_height);
+    let dst_top = f64::from(ribbon.dst_y);
+    let dst_bottom = dst_top + f64::from(ribbon.dst_height);
+    let max_y = i32::from(inner.height.saturating_sub(1));
+    for index in 0..ribbon.width {
+        let t = if ribbon.width <= 1 {
+            0.0
+        } else {
+            f64::from(index) / (span - 1.0)
+        };
+        let blend = smoothstep(t);
+        let mut top = src_top + (dst_top - src_top) * blend;
+        let mut bottom = src_bottom + (dst_bottom - src_bottom) * blend;
+        if bottom < top {
+            std::mem::swap(&mut top, &mut bottom);
+        }
+        if bottom <= top {
+            bottom = top + 1.0;
+        }
+        let x = inner.x.saturating_add(ribbon.x).saturating_add(index);
+        if x >= inner.right() {
+            continue;
+        }
+        let first = top.floor() as i32;
+        let last = bottom.ceil() as i32;
+        for y in first..last {
+            if y < 0 || y >= max_y {
+                continue;
+            }
+            let cell_top = f64::from(y);
+            let cover_top = top.max(cell_top);
+            let cover_bottom = bottom.min(cell_top + 1.0);
+            let overlap = cover_bottom - cover_top;
+            if overlap <= 0.0 {
+                continue;
+            }
+            let eighths = (overlap * 8.0).round().clamp(1.0, 8.0) as u8;
+            let symbol = edge_symbol(eighths, cover_top, cover_bottom, cell_top);
+            let cell_y = inner.y.saturating_add(y as u16);
+            if cell_y >= inner.bottom() {
+                continue;
+            }
+            frame.buffer_mut()[(x, cell_y)]
+                .set_symbol(symbol)
+                .set_style(style);
+        }
+    }
+}
+
+fn smoothstep(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn edge_symbol(eighths: u8, cover_top: f64, cover_bottom: f64, cell_top: f64) -> &'static str {
+    if eighths >= 8 {
+        return "█";
+    }
+    let from_top = cover_top <= cell_top + 0.05;
+    let from_bottom = cover_bottom >= cell_top + 0.95;
+    if from_top {
+        upper_block(eighths)
+    } else if from_bottom {
+        lower_block(eighths)
+    } else if eighths >= 4 {
+        "▀"
+    } else {
+        "▔"
+    }
+}
+
+fn lower_block(eighths: u8) -> &'static str {
+    match eighths {
+        1 => "▁",
+        2 => "▂",
+        3 => "▃",
+        4 => "▄",
+        5 => "▅",
+        6 => "▆",
+        7 => "▇",
+        _ => "█",
+    }
+}
+
+fn upper_block(eighths: u8) -> &'static str {
+    match eighths {
+        1 => "▔",
+        2 => "🮂",
+        3 => "🮃",
+        4 => "▀",
+        5 => "🮄",
+        6 => "🮅",
+        7 => "🮆",
+        _ => "█",
+    }
+}
+
+fn node_label(stage: Stage, count: usize, width: usize) -> String {
+    let count = count.to_string();
+    let full = format!("{} {count}", stage.label());
+    if full.chars().count() <= width {
+        return full;
+    }
+    let budget = width.saturating_sub(count.chars().count() + 1);
+    let short: String = stage.label().chars().take(budget).collect();
+    if budget == 0 {
+        count.chars().take(width).collect()
+    } else {
+        format!("{short} {count}")
+    }
 }
 
 fn draw_stage_picker(frame: &mut Frame, model: &Model, area: Rect) {
@@ -470,8 +660,7 @@ fn cursor_grapheme(graphemes: &[Grapheme<'_>], cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Snapshot, Stage, StageEvent};
-    use crate::model::Model;
+    use crate::domain::{ApplicationId, EventId, Filter, Snapshot, StageEvent};
     use jiff::civil::Date;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -483,21 +672,21 @@ mod tests {
 
     fn fixture() -> Model {
         let acme = Application::new(
-            3,
+            ApplicationId::new(3),
             "Acme".into(),
             "Backend".into(),
             vec![StageEvent {
-                id: 2,
+                id: EventId::new(2),
                 stage: Stage::FirstMeeting,
                 occurred_on: date(2026, 11, 14),
             }],
         );
         let northwind = Application::new(
-            4,
+            ApplicationId::new(4),
             "Northwind".into(),
             "iOS".into(),
             vec![StageEvent {
-                id: 9,
+                id: EventId::new(9),
                 stage: Stage::TechnicalMeeting,
                 occurred_on: date(2026, 11, 17),
             }],
@@ -562,9 +751,62 @@ mod tests {
             text.contains(r"C:\data\job-tracker\data\tracker.db"),
             "{text}"
         );
+        assert!(text.contains("g flow"), "{text}");
         assert!(
-            text.contains("The time graph is not drawn in this build."),
+            text.contains("g shows every application, ignoring the filter."),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn sankey_draws_every_application_when_the_filter_hides_them() {
+        let mut model = Model::new(
+            Snapshot {
+                applications: vec![
+                    Application::new(
+                        ApplicationId::new(1),
+                        "Acme".into(),
+                        "Backend".into(),
+                        vec![
+                            StageEvent {
+                                id: EventId::new(1),
+                                stage: Stage::Applied,
+                                occurred_on: date(2026, 11, 1),
+                            },
+                            StageEvent {
+                                id: EventId::new(2),
+                                stage: Stage::Refused,
+                                occurred_on: date(2026, 11, 2),
+                            },
+                        ],
+                    ),
+                    Application::new(
+                        ApplicationId::new(2),
+                        "Northwind".into(),
+                        "iOS".into(),
+                        vec![StageEvent {
+                            id: EventId::new(3),
+                            stage: Stage::Applied,
+                            occurred_on: date(2026, 11, 3),
+                        }],
+                    ),
+                ],
+            },
+            PathBuf::from("tracker.db"),
+        );
+        model.filter = Filter::Text("no-such-company".into());
+        model.mode = Mode::Sankey;
+        let text = render(&mut model, 80, 24);
+        assert!(text.contains("Applied"), "{text}");
+        assert!(text.contains("Refused"), "{text}");
+        assert!(text.contains("Flow · 2"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
+        assert!(!text.contains("no-such-company"), "{text}");
+        assert!(
+            ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▔", "▀", "🮂", "🮃", "🮄", "🮅", "🮆"]
+                .iter()
+                .any(|glyph| text.contains(glyph)),
+            "ribbon edge should use a partial block\n{text}"
         );
     }
 

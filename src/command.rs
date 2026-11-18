@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use jiff::civil::Date;
 use thiserror::Error;
 
-use crate::domain::{Filter, NameIssue, Op, Stage, StageParseError, normalize_name};
+use crate::domain::{
+    ApplicationId, EventId, Filter, NameIssue, Op, Stage, StageParseError, normalize_name,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Parsed {
@@ -122,7 +124,7 @@ fn parse_stage(rest: &str, today: Date) -> Result<Op, ParseError> {
         }
     };
     Ok(Op::SetStage {
-        application_id: parse_id(id)?,
+        application_id: parse_application_id(id)?,
         stage: require_stage(stage)?,
         on,
     })
@@ -136,7 +138,7 @@ fn parse_rename(rest: &str) -> Result<Op, ParseError> {
         ));
     };
     Ok(Op::Rename {
-        application_id: parse_id(id)?,
+        application_id: parse_application_id(id)?,
         company: company_name(company)?,
         role: role_name(role)?,
     })
@@ -148,7 +150,7 @@ fn parse_delete(rest: &str) -> Result<Op, ParseError> {
         return Err(ParseError::Usage("usage: delete <id>".into()));
     };
     Ok(Op::Delete {
-        application_id: parse_id(id)?,
+        application_id: parse_application_id(id)?,
     })
 }
 
@@ -160,7 +162,7 @@ fn parse_event(rest: &str) -> Result<Op, ParseError> {
         ));
     };
     Ok(Op::AmendEvent {
-        event_id: parse_id(id)?,
+        event_id: parse_event_id(id)?,
         stage: require_stage(stage)?,
         on: require_date(date)?,
     })
@@ -172,18 +174,18 @@ fn parse_delete_event(rest: &str) -> Result<Op, ParseError> {
         return Err(ParseError::Usage("usage: delete-event <event_id>".into()));
     };
     Ok(Op::DeleteEvent {
-        event_id: parse_id(id)?,
+        event_id: parse_event_id(id)?,
     })
 }
 
 fn parse_filter(rest: &str) -> Filter {
     let rest = rest.trim();
-    if rest.is_empty() || rest.eq_ignore_ascii_case("active") {
+    if rest.is_empty() || rest.eq_ignore_ascii_case("all") {
+        Filter::All
+    } else if rest.eq_ignore_ascii_case("active") {
         Filter::Active
     } else if rest.eq_ignore_ascii_case("closed") {
         Filter::Closed
-    } else if rest.eq_ignore_ascii_case("all") {
-        Filter::All
     } else if rest.eq_ignore_ascii_case("offer") {
         Filter::Offer
     } else {
@@ -199,7 +201,15 @@ fn parse_export(rest: &str) -> Result<PathBuf, ParseError> {
     Ok(PathBuf::from(path))
 }
 
-fn parse_id(text: &str) -> Result<i64, ParseError> {
+fn parse_application_id(text: &str) -> Result<ApplicationId, ParseError> {
+    Ok(ApplicationId::new(parse_raw_id(text)?))
+}
+
+fn parse_event_id(text: &str) -> Result<EventId, ParseError> {
+    Ok(EventId::new(parse_raw_id(text)?))
+}
+
+fn parse_raw_id(text: &str) -> Result<i64, ParseError> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ParseError::InvalidId(text.to_string()));
     }
@@ -245,7 +255,6 @@ fn named(kind: &str, value: &str) -> Result<String, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Stage;
 
     fn today() -> Date {
         Date::new(2026, 11, 17).unwrap()
@@ -278,7 +287,7 @@ mod tests {
         assert_eq!(
             parse_ok("stage 3 first"),
             Parsed::Apply(Op::SetStage {
-                application_id: 3,
+                application_id: ApplicationId::new(3),
                 stage: Stage::FirstMeeting,
                 on: today(),
             })
@@ -286,7 +295,7 @@ mod tests {
         assert_eq!(
             parse_ok("stage 3 technical_meeting 2026-11-17"),
             Parsed::Apply(Op::SetStage {
-                application_id: 3,
+                application_id: ApplicationId::new(3),
                 stage: Stage::TechnicalMeeting,
                 on: today(),
             })
@@ -294,29 +303,33 @@ mod tests {
         assert_eq!(
             parse_ok("rename 3 | Acme Corp | Backend engineer"),
             Parsed::Apply(Op::Rename {
-                application_id: 3,
+                application_id: ApplicationId::new(3),
                 company: "Acme Corp".into(),
                 role: "Backend engineer".into(),
             })
         );
         assert_eq!(
             parse_ok("delete 3"),
-            Parsed::Apply(Op::Delete { application_id: 3 })
+            Parsed::Apply(Op::Delete {
+                application_id: ApplicationId::new(3)
+            })
         );
         assert_eq!(
             parse_ok("event 4 first_meeting 2026-11-12"),
             Parsed::Apply(Op::AmendEvent {
-                event_id: 4,
+                event_id: EventId::new(4),
                 stage: Stage::FirstMeeting,
                 on: Date::new(2026, 11, 12).unwrap(),
             })
         );
         assert_eq!(
             parse_ok("delete-event 4"),
-            Parsed::Apply(Op::DeleteEvent { event_id: 4 })
+            Parsed::Apply(Op::DeleteEvent {
+                event_id: EventId::new(4)
+            })
         );
         assert_eq!(parse_ok("filter active"), Parsed::Filter(Filter::Active));
-        assert_eq!(parse_ok("filter"), Parsed::Filter(Filter::Active));
+        assert_eq!(parse_ok("filter"), Parsed::Filter(Filter::All));
         assert_eq!(parse_ok("FILTER All"), Parsed::Filter(Filter::All));
         assert_eq!(
             parse_ok("filter acme"),
@@ -428,7 +441,7 @@ mod tests {
         assert_eq!(
             parse_ok("stage 3 made 2027-01-15"),
             Parsed::Apply(Op::SetStage {
-                application_id: 3,
+                application_id: ApplicationId::new(3),
                 stage: Stage::OfferMade,
                 on: Date::new(2027, 1, 15).unwrap(),
             })

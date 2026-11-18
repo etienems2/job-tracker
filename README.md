@@ -45,4 +45,4 @@ export <path>
 
 Stages: `applied`, `first_meeting`, `second_meeting`, `third_meeting`, `technical_meeting`, `offer_made`, `offer_accepted`, `refused`.
 
-`n` starts `add`, `s` picks a stage for today, `d` starts `delete`, `/` starts `filter`, and `o` cycles the sort. `filter` with no argument returns to `active`.
+`n` starts `add`, `s` picks a stage for today, `d` starts `delete`, `/` starts `filter`, `o` cycles the sort, and `g` shows the flow of every application. `filter` with no argument returns to `all`.

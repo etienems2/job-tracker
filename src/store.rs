@@ -4,8 +4,11 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::domain::{
-    Application, MAX_NAME_CHARS, NameIssue, Op, Snapshot, Stage, StageEvent, normalize_name,
+    Application, ApplicationId, EventId, MAX_NAME_CHARS, NameIssue, Op, Snapshot, Stage,
+    StageEvent, normalize_name,
 };
+
+const SQLITE_BUSY_TIMEOUT: i64 = 3000;
 
 const SUPPORTED_VERSION: i64 = 2;
 
@@ -37,6 +40,8 @@ CREATE INDEX stage_events_by_app
 "#;
 
 const MIGRATION_V2: &str = r#"
+-- `1970-01-01` exists only so NOT NULL is legal on an added column.
+-- The UPDATE below replaces it before the migration commits.
 ALTER TABLE applications ADD COLUMN applied_on TEXT NOT NULL DEFAULT '1970-01-01'
     CHECK (applied_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 
@@ -169,14 +174,22 @@ impl Store for SqliteStore {
                 .ok_or_else(|| StoreError::Invalid(format!("unknown stage '{}'", row.stage)))?;
             let occurred_on = parse_stored_date(&row.occurred_on)?;
             let event = StageEvent {
-                id: row.event_id,
+                id: EventId::new(row.event_id),
                 stage,
                 occurred_on,
             };
-            if applications.last().is_some_and(|app| app.id == row.app_id) {
-                applications.last_mut().unwrap().events.push(event);
+            if let Some(app) = applications
+                .last_mut()
+                .filter(|app| app.id == ApplicationId::new(row.app_id))
+            {
+                app.events.push(event);
             } else {
-                let mut app = Application::new(row.app_id, row.company, row.role, vec![event]);
+                let mut app = Application::new(
+                    ApplicationId::new(row.app_id),
+                    row.company,
+                    row.role,
+                    vec![event],
+                );
                 app.applied_on = parse_stored_date(&row.applied_on)?;
                 applications.push(app);
             }
@@ -200,7 +213,7 @@ impl Store for SqliteStore {
             .applications
             .into_iter()
             .map(|app| ExportApplication {
-                id: app.id,
+                id: app.id.0,
                 company: app.company,
                 role: app.role,
                 applied_on: app.applied_on.to_string(),
@@ -208,7 +221,7 @@ impl Store for SqliteStore {
                     .events
                     .into_iter()
                     .map(|event| ExportEvent {
-                        id: event.id,
+                        id: event.id.0,
                         stage: event.stage.token().to_string(),
                         date: event.occurred_on.to_string(),
                     })
@@ -250,7 +263,7 @@ fn configure(conn: &Connection, wal: bool) -> Result<(), StoreError> {
     if wal {
         conn.pragma_update(None, "journal_mode", "WAL")?;
     }
-    conn.pragma_update(None, "busy_timeout", 3000_i64)?;
+    conn.pragma_update(None, "busy_timeout", SQLITE_BUSY_TIMEOUT)?;
     Ok(())
 }
 
@@ -300,14 +313,14 @@ fn add(
         "INSERT INTO applications (company, role) VALUES (?1, ?2)",
         params![company, role],
     )?;
-    let application_id = conn.last_insert_rowid();
+    let application_id = ApplicationId::new(conn.last_insert_rowid());
     insert_event(conn, application_id, stage, &date)?;
     refresh_applied_on(conn, application_id)
 }
 
 fn set_stage(
     conn: &Connection,
-    application_id: i64,
+    application_id: ApplicationId,
     stage: Stage,
     on: Date,
 ) -> Result<(), StoreError> {
@@ -323,7 +336,7 @@ fn set_stage(
 
 fn rename(
     conn: &Connection,
-    application_id: i64,
+    application_id: ApplicationId,
     company: &str,
     role: &str,
 ) -> Result<(), StoreError> {
@@ -331,7 +344,7 @@ fn rename(
     let role = require_name("role", role)?;
     let changed = conn.execute(
         "UPDATE applications SET company = ?1, role = ?2 WHERE id = ?3",
-        params![company, role, application_id],
+        params![company, role, application_id.0],
     )?;
     if changed == 0 {
         return Err(StoreError::Invalid(format!(
@@ -341,8 +354,8 @@ fn rename(
     Ok(())
 }
 
-fn delete_application(conn: &Connection, application_id: i64) -> Result<(), StoreError> {
-    let changed = conn.execute("DELETE FROM applications WHERE id = ?1", [application_id])?;
+fn delete_application(conn: &Connection, application_id: ApplicationId) -> Result<(), StoreError> {
+    let changed = conn.execute("DELETE FROM applications WHERE id = ?1", [application_id.0])?;
     if changed == 0 {
         return Err(StoreError::Invalid(format!(
             "no application {application_id}"
@@ -351,12 +364,17 @@ fn delete_application(conn: &Connection, application_id: i64) -> Result<(), Stor
     Ok(())
 }
 
-fn amend_event(conn: &Connection, event_id: i64, stage: Stage, on: Date) -> Result<(), StoreError> {
+fn amend_event(
+    conn: &Connection,
+    event_id: EventId,
+    stage: Stage,
+    on: Date,
+) -> Result<(), StoreError> {
     let date = sql_date(on)?;
     let application_id = event_application_id(conn, event_id)?;
     let changed = conn.execute(
         "UPDATE stage_events SET stage = ?1, occurred_on = ?2 WHERE id = ?3",
-        params![stage.token(), date, event_id],
+        params![stage.token(), date, event_id.0],
     )?;
     if changed == 0 {
         return Err(StoreError::Invalid(format!("no event {event_id}")));
@@ -364,11 +382,11 @@ fn amend_event(conn: &Connection, event_id: i64, stage: Stage, on: Date) -> Resu
     refresh_applied_on(conn, application_id)
 }
 
-fn delete_event(conn: &Connection, event_id: i64) -> Result<(), StoreError> {
+fn delete_event(conn: &Connection, event_id: EventId) -> Result<(), StoreError> {
     let application_id = event_application_id(conn, event_id)?;
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM stage_events WHERE application_id = ?1",
-        [application_id],
+        [application_id.0],
         |row| row.get(0),
     )?;
     if count <= 1 {
@@ -376,21 +394,23 @@ fn delete_event(conn: &Connection, event_id: i64) -> Result<(), StoreError> {
             "cannot delete the only stage event; delete the application instead".into(),
         ));
     }
-    conn.execute("DELETE FROM stage_events WHERE id = ?1", [event_id])?;
+    conn.execute("DELETE FROM stage_events WHERE id = ?1", [event_id.0])?;
     refresh_applied_on(conn, application_id)
 }
 
-fn event_application_id(conn: &Connection, event_id: i64) -> Result<i64, StoreError> {
-    conn.query_row(
-        "SELECT application_id FROM stage_events WHERE id = ?1",
-        [event_id],
-        |row| row.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| StoreError::Invalid(format!("no event {event_id}")))
+fn event_application_id(conn: &Connection, event_id: EventId) -> Result<ApplicationId, StoreError> {
+    let id = conn
+        .query_row(
+            "SELECT application_id FROM stage_events WHERE id = ?1",
+            [event_id.0],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::Invalid(format!("no event {event_id}")))?;
+    Ok(ApplicationId::new(id))
 }
 
-fn refresh_applied_on(conn: &Connection, application_id: i64) -> Result<(), StoreError> {
+fn refresh_applied_on(conn: &Connection, application_id: ApplicationId) -> Result<(), StoreError> {
     conn.execute(
         "UPDATE applications
          SET applied_on = (
@@ -400,7 +420,7 @@ fn refresh_applied_on(conn: &Connection, application_id: i64) -> Result<(), Stor
              LIMIT 1
          )
          WHERE id = ?1",
-        [application_id],
+        [application_id.0],
     )?;
     Ok(())
 }
@@ -412,20 +432,22 @@ fn parse_stored_date(text: &str) -> Result<Date, StoreError> {
 
 fn insert_event(
     conn: &Connection,
-    application_id: i64,
+    application_id: ApplicationId,
     stage: Stage,
     date: &str,
 ) -> Result<(), StoreError> {
     conn.execute(
         "INSERT INTO stage_events (application_id, stage, occurred_on) VALUES (?1, ?2, ?3)",
-        params![application_id, stage.token(), date],
+        params![application_id.0, stage.token(), date],
     )?;
     Ok(())
 }
 
-fn application_exists(conn: &Connection, id: i64) -> Result<bool, StoreError> {
+fn application_exists(conn: &Connection, id: ApplicationId) -> Result<bool, StoreError> {
     let found = conn
-        .query_row("SELECT 1 FROM applications WHERE id = ?1", [id], |_| Ok(()))
+        .query_row("SELECT 1 FROM applications WHERE id = ?1", [id.0], |_| {
+            Ok(())
+        })
         .optional()?;
     Ok(found.is_some())
 }
@@ -653,7 +675,7 @@ mod tests {
         let mut store = memory();
         let missing = store
             .apply(Op::SetStage {
-                application_id: 9,
+                application_id: ApplicationId::new(9),
                 stage: Stage::Applied,
                 on: day(1),
             })
@@ -812,7 +834,7 @@ mod tests {
                 .conn
                 .pragma_query_value(None, "busy_timeout", |row| row.get(0))
                 .unwrap();
-            assert_eq!(timeout, 3000);
+            assert_eq!(timeout, SQLITE_BUSY_TIMEOUT);
             store
                 .apply(add("Acme", "Backend", Stage::Applied, day(1)))
                 .unwrap();
@@ -942,13 +964,17 @@ mod tests {
         let mut store = memory();
         let amended = store
             .apply(Op::AmendEvent {
-                event_id: 4,
+                event_id: EventId::new(4),
                 stage: Stage::Applied,
                 on: day(1),
             })
             .unwrap_err();
         assert!(amended.to_string().contains("no event 4"));
-        let deleted = store.apply(Op::DeleteEvent { event_id: 4 }).unwrap_err();
+        let deleted = store
+            .apply(Op::DeleteEvent {
+                event_id: EventId::new(4),
+            })
+            .unwrap_err();
         assert!(deleted.to_string().contains("no event 4"));
     }
 }

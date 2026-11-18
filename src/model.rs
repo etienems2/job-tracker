@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use ratatui::widgets::TableState;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::domain::{Application, Filter, Snapshot, Sort, cmp_applications};
+use crate::domain::{Application, ApplicationId, Filter, Snapshot, Sort, cmp_applications};
+
+pub(crate) const DETAIL_SIDE_BY_SIDE_WIDTH: u16 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -11,6 +13,7 @@ pub(crate) enum Mode {
     Command,
     StagePick,
     Help,
+    Sankey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +128,7 @@ impl Model {
             table_state: TableState::default(),
             mode: Mode::Normal,
             command: CommandLine::new(),
-            filter: Filter::Active,
+            filter: Filter::All,
             sort: Sort::Recent,
             status: db_path.display().to_string(),
             status_error: false,
@@ -151,7 +154,7 @@ impl Model {
         indices
     }
 
-    pub(crate) fn selected_id(&self) -> Option<i64> {
+    pub(crate) fn selected_id(&self) -> Option<ApplicationId> {
         let indices = self.visible_indices();
         indices
             .get(self.selection)
@@ -163,7 +166,7 @@ impl Model {
         indices.get(self.selection).map(|&index| &self.apps[index])
     }
 
-    pub(crate) fn select_id(&mut self, id: i64) {
+    pub(crate) fn select_id(&mut self, id: ApplicationId) {
         let indices = self.visible_indices();
         self.selection = indices
             .into_iter()
@@ -189,6 +192,12 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_model_shows_every_application() {
+        let model = Model::new(Snapshot { applications: vec![] }, PathBuf::from("tracker.db"));
+        assert_eq!(model.filter, Filter::All);
+    }
 
     #[test]
     fn backspace_removes_one_grapheme() {

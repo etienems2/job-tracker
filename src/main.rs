@@ -3,6 +3,7 @@ mod domain;
 mod import;
 mod message;
 mod model;
+mod sankey;
 mod store;
 mod tui;
 mod update;

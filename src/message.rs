@@ -1,6 +1,6 @@
 use jiff::civil::Date;
 
-use crate::domain::{Snapshot, Stage};
+use crate::domain::{ApplicationId, Snapshot, Stage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Message {
@@ -29,10 +29,11 @@ pub(crate) enum Message {
     },
     PromptDelete,
     ShowHelp,
+    ShowSankey,
     Loaded {
         snapshot: Snapshot,
         status: String,
-        focus: Option<i64>,
+        focus: Option<ApplicationId>,
     },
     Failed(String),
     Status(String),

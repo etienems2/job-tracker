@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt;
 
 use jiff::civil::Date;
 
@@ -129,25 +130,59 @@ fn stage_matches(stage: Stage, input: &str) -> bool {
     token.starts_with(input) || token.split('_').any(|part| part.starts_with(input))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ApplicationId(pub(crate) i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EventId(pub(crate) i64);
+
+impl ApplicationId {
+    pub(crate) const fn new(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+impl EventId {
+    pub(crate) const fn new(id: i64) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for ApplicationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for EventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StageEvent {
-    pub(crate) id: i64,
+    pub(crate) id: EventId,
     pub(crate) stage: Stage,
     pub(crate) occurred_on: Date,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Application {
-    pub(crate) id: i64,
+    pub(crate) id: ApplicationId,
     pub(crate) company: String,
     pub(crate) role: String,
-    /// Date of the earliest stage event, stored on the application as well.
     pub(crate) applied_on: Date,
     pub(crate) events: Vec<StageEvent>,
 }
 
 impl Application {
-    pub(crate) fn new(id: i64, company: String, role: String, mut events: Vec<StageEvent>) -> Self {
+    pub(crate) fn new(
+        id: ApplicationId,
+        company: String,
+        role: String,
+        mut events: Vec<StageEvent>,
+    ) -> Self {
         events.sort_by(cmp_events);
         let applied_on = events
             .first()
@@ -203,25 +238,25 @@ pub(crate) enum Op {
         on: Date,
     },
     SetStage {
-        application_id: i64,
+        application_id: ApplicationId,
         stage: Stage,
         on: Date,
     },
     Rename {
-        application_id: i64,
+        application_id: ApplicationId,
         company: String,
         role: String,
     },
     Delete {
-        application_id: i64,
+        application_id: ApplicationId,
     },
     AmendEvent {
-        event_id: i64,
+        event_id: EventId,
         stage: Stage,
         on: Date,
     },
     DeleteEvent {
-        event_id: i64,
+        event_id: EventId,
     },
 }
 
@@ -279,18 +314,18 @@ pub(crate) fn cmp_applications(left: &Application, right: &Application, sort: So
     }
 }
 
-fn recent_key(app: &Application) -> (Date, i64, i64) {
+fn recent_key(app: &Application) -> (Date, EventId, ApplicationId) {
     match app.current() {
         Some(event) => (event.occurred_on, event.id, app.id),
-        None => (Date::MIN, 0, app.id),
+        None => (Date::MIN, EventId::new(0), app.id),
     }
 }
 
-fn company_key(app: &Application) -> (String, String, i64) {
+fn company_key(app: &Application) -> (String, String, ApplicationId) {
     (app.company.to_lowercase(), app.role.to_lowercase(), app.id)
 }
 
-fn pipeline_key(app: &Application) -> (u8, String, i64) {
+fn pipeline_key(app: &Application) -> (u8, String, ApplicationId) {
     let rank = app
         .current()
         .map(|event| event.stage.pipeline_rank())
@@ -308,14 +343,19 @@ mod tests {
 
     fn event(id: i64, stage: Stage, on: Date) -> StageEvent {
         StageEvent {
-            id,
+            id: EventId::new(id),
             stage,
             occurred_on: on,
         }
     }
 
     fn app(events: Vec<StageEvent>) -> Application {
-        Application::new(1, "Acme".into(), "Backend".into(), events)
+        Application::new(
+            ApplicationId::new(1),
+            "Acme".into(),
+            "Backend".into(),
+            events,
+        )
     }
 
     #[test]
@@ -325,15 +365,15 @@ mod tests {
             event(2, Stage::FirstMeeting, same_day),
             event(1, Stage::Applied, same_day),
         ]);
-        assert_eq!(application.events[0].id, 1);
-        assert_eq!(application.current().unwrap().id, 2);
+        assert_eq!(application.events[0].id, EventId::new(1));
+        assert_eq!(application.current().unwrap().id, EventId::new(2));
         assert_eq!(application.current().unwrap().stage, Stage::FirstMeeting);
 
         let later_date_lower_id = app(vec![
             event(9, Stage::Applied, date(2026, 11, 2)),
             event(1, Stage::Refused, date(2026, 11, 3)),
         ]);
-        assert_eq!(later_date_lower_id.current().unwrap().id, 1);
+        assert_eq!(later_date_lower_id.current().unwrap().id, EventId::new(1));
         assert_eq!(later_date_lower_id.current().unwrap().stage, Stage::Refused);
     }
 
@@ -420,13 +460,13 @@ mod tests {
     #[test]
     fn recent_sort_is_newest_stage_date_then_id() {
         let older = Application::new(
-            2,
+            ApplicationId::new(2),
             "Acme".into(),
             "Role".into(),
             vec![event(1, Stage::Applied, date(2026, 11, 1))],
         );
         let newer = Application::new(
-            1,
+            ApplicationId::new(1),
             "Northwind".into(),
             "Role".into(),
             vec![event(2, Stage::Applied, date(2026, 11, 20))],
@@ -437,13 +477,13 @@ mod tests {
         );
 
         let same_day_low = Application::new(
-            3,
+            ApplicationId::new(3),
             "A".into(),
             "Role".into(),
             vec![event(1, Stage::Applied, date(2026, 11, 20))],
         );
         let same_day_high = Application::new(
-            4,
+            ApplicationId::new(4),
             "B".into(),
             "Role".into(),
             vec![event(8, Stage::FirstMeeting, date(2026, 11, 20))],

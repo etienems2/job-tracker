@@ -1,5 +1,3 @@
-//! CSV rows become new applications. One row is one application.
-
 use std::io::Read;
 
 use jiff::civil::Date;
@@ -17,10 +15,6 @@ pub(crate) enum ImportError {
     Csv(#[from] csv::Error),
 }
 
-/// Read applications from a CSV document. The first data row is row 1.
-///
-/// `company` and `role` are required. `stage` and `date` may be absent or
-/// blank (`applied` and `today`). Any other column is ignored.
 pub(crate) fn read_applications(reader: impl Read, today: Date) -> Result<Vec<Op>, ImportError> {
     let mut csv_reader = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
     let headers = csv_reader.headers()?.clone();
