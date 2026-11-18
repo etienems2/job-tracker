@@ -1,5 +1,3 @@
-//! Inputs the event loop hands to `update`. Keys are translated before this.
-
 use jiff::civil::Date;
 
 use crate::domain::{Snapshot, Stage};

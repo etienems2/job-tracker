@@ -1,5 +1,3 @@
-//! Pure state transitions. The event loop performs any `Effect` against the store.
-
 use std::path::PathBuf;
 
 use crate::command::{self, Parsed};

@@ -1,5 +1,3 @@
-//! Command text, after the leading colon, parsed into a store write or a view change.
-
 use std::path::PathBuf;
 
 use jiff::civil::Date;

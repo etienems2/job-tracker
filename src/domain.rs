@@ -1,8 +1,3 @@
-//! Applications, stages, and the writes the store understands.
-//!
-//! An application always has at least one stage event. The current stage is the
-//! event with the greatest `(occurred_on, id)`. Any stage may follow any other.
-
 use std::cmp::Ordering;
 
 use jiff::civil::Date;
@@ -15,7 +10,6 @@ pub(crate) enum NameIssue {
     TooLong,
 }
 
-/// Trim a company or role and enforce the store's length rule.
 pub(crate) fn normalize_name(value: &str) -> Result<String, NameIssue> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -83,7 +77,6 @@ impl Stage {
         }
     }
 
-    /// Pipeline order for sorting. This is not a state machine.
     pub(crate) fn pipeline_rank(self) -> u8 {
         match self {
             Stage::Applied => 0,
@@ -109,10 +102,6 @@ impl Stage {
         Stage::ALL.into_iter().find(|stage| stage.token() == token)
     }
 
-    /// A token or a unique prefix of the token or one of its parts.
-    ///
-    /// `first`, `tech`, `made`, and `accepted` match. `t` and `offer` do not,
-    /// because more than one stage would.
     pub(crate) fn parse_prefix(input: &str) -> Result<Stage, StageParseError> {
         let input = input.trim().to_ascii_lowercase();
         if input.is_empty() {
@@ -169,7 +158,6 @@ impl Application {
         });
     }
 
-    /// The latest event. `None` only when the application has no history.
     pub(crate) fn current(&self) -> Option<&StageEvent> {
         self.events.last()
     }
@@ -250,7 +238,6 @@ impl Filter {
     }
 }
 
-/// Newest current-stage date first, then company, then pipeline stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sort {
     Recent,

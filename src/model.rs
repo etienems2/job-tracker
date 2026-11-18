@@ -1,5 +1,3 @@
-//! Last snapshot plus the list, command line, and overlay state.
-
 use std::path::PathBuf;
 
 use ratatui::widgets::TableState;
@@ -18,7 +16,6 @@ pub(crate) enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandLine {
     pub(crate) buffer: String,
-    /// Byte index on a grapheme boundary.
     pub(crate) cursor: usize,
 }
 
@@ -211,8 +208,6 @@ mod tests {
         assert_eq!(line.cursor, 0);
         line.insert("a");
         assert_eq!(line.buffer, "ae\u{0301}");
-        // The cursor sits after "a", so forward-delete removes the whole
-        // combining cluster rather than only the base letter.
         line.delete_forward();
         assert_eq!(line.buffer, "a");
     }

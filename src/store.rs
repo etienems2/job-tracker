@@ -1,8 +1,3 @@
-//! SQLite durability for applications and their stage history.
-//!
-//! Filtering and sorting happen on the in-memory snapshot. `apply` writes one
-//! transaction, then loads the snapshot the model swaps in.
-
 use jiff::civil::Date;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -79,7 +74,6 @@ impl SqliteStore {
         Ok(store)
     }
 
-    /// In-memory connections skip WAL; it is a file-database pragma.
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
@@ -87,6 +81,26 @@ impl SqliteStore {
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub(crate) fn insert_all(&mut self, ops: &[Op]) -> Result<Snapshot, StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for op in ops {
+            let Op::Add {
+                company,
+                role,
+                stage,
+                on,
+            } = op
+            else {
+                return Err(StoreError::Invalid(
+                    "import only inserts new applications".into(),
+                ));
+            };
+            add(&tx, company, role, *stage, *on)?;
+        }
+        tx.commit()?;
+        self.load()
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
@@ -771,6 +785,37 @@ mod tests {
         assert_eq!(snapshot.applications.len(), 1);
         assert_eq!(snapshot.applications[0].company, "Acme");
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn insert_all_adds_each_row_as_its_own_application() {
+        let mut store = memory();
+        let snapshot = store
+            .insert_all(&[
+                add("Acme", "Backend", Stage::Applied, day(1)),
+                add("Acme", "Backend", Stage::TechnicalMeeting, day(14)),
+            ])
+            .unwrap();
+        assert_eq!(snapshot.applications.len(), 2);
+        assert_ne!(snapshot.applications[0].id, snapshot.applications[1].id);
+        assert_eq!(snapshot.applications[0].company, "Acme");
+        assert_eq!(
+            snapshot.applications[1].current().unwrap().stage,
+            Stage::TechnicalMeeting
+        );
+    }
+
+    #[test]
+    fn insert_all_rolls_back_when_a_later_row_is_invalid() {
+        let mut store = memory();
+        let error = store
+            .insert_all(&[
+                add("Acme", "Backend", Stage::Applied, day(1)),
+                add("   ", "Backend", Stage::Applied, day(2)),
+            ])
+            .unwrap_err();
+        assert!(error.to_string().contains("company is empty"), "{error}");
+        assert!(store.load().unwrap().applications.is_empty());
     }
 
     #[test]

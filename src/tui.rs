@@ -1,6 +1,3 @@
-//! Terminal lifecycle and the event loop. This is the only place that touches
-//! both the model and the database.
-
 use std::path::{Path, PathBuf};
 
 use jiff::civil::Date;

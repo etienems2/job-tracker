@@ -1,5 +1,3 @@
-//! List, detail, command line, and help. The time graph is intentionally absent.
-
 use std::path::Path;
 
 use ratatui::Frame;
@@ -101,7 +99,6 @@ fn field_specs() -> [Spec; 5] {
     ]
 }
 
-/// Columns that fit, in display order. Stage is kept ahead of id when the width is tight.
 fn column_plan(area_width: u16) -> Vec<(Field, u16)> {
     let budget = area_width.saturating_sub(3);
     if budget == 0 {
@@ -408,7 +405,6 @@ struct Grapheme<'a> {
     width: usize,
 }
 
-/// The slice of the command that fits, and the cursor column within that slice.
 fn command_window(buffer: &str, cursor: usize, width: usize) -> (String, usize) {
     if width == 0 {
         return (String::new(), 0);
