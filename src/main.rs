@@ -27,10 +27,10 @@ fn main() -> color_eyre::Result<()> {
         Some(path) => path,
         None => default_db_path()?,
     };
-    let mut store =
+    let store =
         SqliteStore::open(&db_path).map_err(|err| eyre!("open {}: {err}", db_path.display()))?;
     if let Some(csv_path) = args.import {
-        let count = import_csv(&mut store, &csv_path, today())?;
+        let count = import_csv(&store, &csv_path, today())?;
         println!("{}", imported_message(count));
         return Ok(());
     }
@@ -79,7 +79,7 @@ where
     Ok(Args { help, db, import })
 }
 
-fn import_csv(store: &mut SqliteStore, path: &Path, today: Date) -> color_eyre::Result<usize> {
+fn import_csv(store: &SqliteStore, path: &Path, today: Date) -> color_eyre::Result<usize> {
     let file = std::fs::File::open(path).map_err(|err| eyre!("open {}: {err}", path.display()))?;
     let applications = import::read_applications(file, today)?;
     let count = applications.len();

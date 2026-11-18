@@ -7,7 +7,7 @@ use crate::domain::{
     Application, MAX_NAME_CHARS, NameIssue, Op, Snapshot, Stage, StageEvent, normalize_name,
 };
 
-const SUPPORTED_VERSION: i64 = 1;
+const SUPPORTED_VERSION: i64 = 2;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE applications (
@@ -34,6 +34,19 @@ CREATE TABLE stage_events (
 
 CREATE INDEX stage_events_by_app
     ON stage_events (application_id, occurred_on, id);
+"#;
+
+const MIGRATION_V2: &str = r#"
+ALTER TABLE applications ADD COLUMN applied_on TEXT NOT NULL DEFAULT '1970-01-01'
+    CHECK (applied_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
+
+UPDATE applications
+SET applied_on = (
+    SELECT occurred_on FROM stage_events
+    WHERE application_id = applications.id
+    ORDER BY occurred_on, id
+    LIMIT 1
+);
 "#;
 
 #[derive(Debug, Error)]
@@ -67,23 +80,22 @@ impl SqliteStore {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        configure(&conn, true)?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
+        Self::from_configured(Connection::open(path)?, true)
     }
 
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
-        configure(&conn, false)?;
+        Self::from_configured(Connection::open_in_memory()?, false)
+    }
+
+    fn from_configured(conn: Connection, wal: bool) -> Result<Self, StoreError> {
+        configure(&conn, wal)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
     }
 
-    pub(crate) fn insert_all(&mut self, ops: &[Op]) -> Result<Snapshot, StoreError> {
+    pub(crate) fn insert_all(&self, ops: &[Op]) -> Result<Snapshot, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         for op in ops {
             let Op::Add {
@@ -114,13 +126,16 @@ impl SqliteStore {
                 supported: SUPPORTED_VERSION,
             });
         }
-        if version != 0 {
+        if version > 1 {
             return Err(StoreError::Invalid(format!(
                 "unsupported database version {version}"
             )));
         }
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute_batch(MIGRATION_V1)?;
+        if version == 0 {
+            tx.execute_batch(MIGRATION_V1)?;
+        }
+        tx.execute_batch(MIGRATION_V2)?;
         tx.pragma_update(None, "user_version", SUPPORTED_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -130,7 +145,7 @@ impl SqliteStore {
 impl Store for SqliteStore {
     fn load(&self) -> Result<Snapshot, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.id, a.company, a.role, e.id, e.stage, e.occurred_on
+            "SELECT a.id, a.company, a.role, a.applied_on, e.id, e.stage, e.occurred_on
              FROM applications a
              INNER JOIN stage_events e ON e.application_id = a.id
              ORDER BY a.id ASC, e.occurred_on ASC, e.id ASC",
@@ -140,9 +155,10 @@ impl Store for SqliteStore {
                 app_id: row.get(0)?,
                 company: row.get(1)?,
                 role: row.get(2)?,
-                event_id: row.get(3)?,
-                stage: row.get(4)?,
-                occurred_on: row.get(5)?,
+                applied_on: row.get(3)?,
+                event_id: row.get(4)?,
+                stage: row.get(5)?,
+                occurred_on: row.get(6)?,
             })
         })?;
 
@@ -151,10 +167,7 @@ impl Store for SqliteStore {
             let row = row?;
             let stage = Stage::from_token(&row.stage)
                 .ok_or_else(|| StoreError::Invalid(format!("unknown stage '{}'", row.stage)))?;
-            let occurred_on = row
-                .occurred_on
-                .parse::<Date>()
-                .map_err(|_| StoreError::Invalid(format!("bad date '{}'", row.occurred_on)))?;
+            let occurred_on = parse_stored_date(&row.occurred_on)?;
             let event = StageEvent {
                 id: row.event_id,
                 stage,
@@ -163,18 +176,14 @@ impl Store for SqliteStore {
             if applications.last().is_some_and(|app| app.id == row.app_id) {
                 applications.last_mut().unwrap().events.push(event);
             } else {
-                applications.push(Application {
-                    id: row.app_id,
-                    company: row.company,
-                    role: row.role,
-                    events: vec![event],
-                });
+                let mut app = Application::new(row.app_id, row.company, row.role, vec![event]);
+                app.applied_on = parse_stored_date(&row.applied_on)?;
+                applications.push(app);
             }
         }
-        let applications = applications
-            .into_iter()
-            .map(|app| Application::new(app.id, app.company, app.role, app.events))
-            .collect();
+        for app in &mut applications {
+            app.sort_events();
+        }
         Ok(Snapshot { applications })
     }
 
@@ -194,6 +203,7 @@ impl Store for SqliteStore {
                 id: app.id,
                 company: app.company,
                 role: app.role,
+                applied_on: app.applied_on.to_string(),
                 events: app
                     .events
                     .into_iter()
@@ -213,6 +223,7 @@ struct LoadedRow {
     app_id: i64,
     company: String,
     role: String,
+    applied_on: String,
     event_id: i64,
     stage: String,
     occurred_on: String,
@@ -223,6 +234,7 @@ struct ExportApplication {
     id: i64,
     company: String,
     role: String,
+    applied_on: String,
     events: Vec<ExportEvent>,
 }
 
@@ -289,7 +301,8 @@ fn add(
         params![company, role],
     )?;
     let application_id = conn.last_insert_rowid();
-    insert_event(conn, application_id, stage, &date)
+    insert_event(conn, application_id, stage, &date)?;
+    refresh_applied_on(conn, application_id)
 }
 
 fn set_stage(
@@ -304,7 +317,8 @@ fn set_stage(
         )));
     }
     let date = sql_date(on)?;
-    insert_event(conn, application_id, stage, &date)
+    insert_event(conn, application_id, stage, &date)?;
+    refresh_applied_on(conn, application_id)
 }
 
 fn rename(
@@ -339,6 +353,7 @@ fn delete_application(conn: &Connection, application_id: i64) -> Result<(), Stor
 
 fn amend_event(conn: &Connection, event_id: i64, stage: Stage, on: Date) -> Result<(), StoreError> {
     let date = sql_date(on)?;
+    let application_id = event_application_id(conn, event_id)?;
     let changed = conn.execute(
         "UPDATE stage_events SET stage = ?1, occurred_on = ?2 WHERE id = ?3",
         params![stage.token(), date, event_id],
@@ -346,20 +361,11 @@ fn amend_event(conn: &Connection, event_id: i64, stage: Stage, on: Date) -> Resu
     if changed == 0 {
         return Err(StoreError::Invalid(format!("no event {event_id}")));
     }
-    Ok(())
+    refresh_applied_on(conn, application_id)
 }
 
 fn delete_event(conn: &Connection, event_id: i64) -> Result<(), StoreError> {
-    let application_id = conn
-        .query_row(
-            "SELECT application_id FROM stage_events WHERE id = ?1",
-            [event_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    let Some(application_id) = application_id else {
-        return Err(StoreError::Invalid(format!("no event {event_id}")));
-    };
+    let application_id = event_application_id(conn, event_id)?;
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM stage_events WHERE application_id = ?1",
         [application_id],
@@ -371,7 +377,37 @@ fn delete_event(conn: &Connection, event_id: i64) -> Result<(), StoreError> {
         ));
     }
     conn.execute("DELETE FROM stage_events WHERE id = ?1", [event_id])?;
+    refresh_applied_on(conn, application_id)
+}
+
+fn event_application_id(conn: &Connection, event_id: i64) -> Result<i64, StoreError> {
+    conn.query_row(
+        "SELECT application_id FROM stage_events WHERE id = ?1",
+        [event_id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| StoreError::Invalid(format!("no event {event_id}")))
+}
+
+fn refresh_applied_on(conn: &Connection, application_id: i64) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE applications
+         SET applied_on = (
+             SELECT occurred_on FROM stage_events
+             WHERE application_id = ?1
+             ORDER BY occurred_on, id
+             LIMIT 1
+         )
+         WHERE id = ?1",
+        [application_id],
+    )?;
     Ok(())
+}
+
+fn parse_stored_date(text: &str) -> Result<Date, StoreError> {
+    text.parse()
+        .map_err(|_| StoreError::Invalid(format!("bad date '{text}'")))
 }
 
 fn insert_event(
@@ -703,6 +739,7 @@ mod tests {
                     "id": 1,
                     "company": "Acme",
                     "role": "Backend engineer",
+                    "applied_on": "2026-11-01",
                     "events": [
                         { "id": 1, "stage": "applied", "date": "2026-11-01" },
                         { "id": 2, "stage": "first_meeting", "date": "2026-11-14" }
@@ -740,7 +777,7 @@ mod tests {
             .unwrap();
         assert_eq!(journal, "memory");
         let version = user_version(&store.conn).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let foreign_keys: i64 = store
             .conn
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
@@ -754,7 +791,7 @@ mod tests {
         let store = memory();
         store
             .conn
-            .pragma_update(None, "user_version", 2_i64)
+            .pragma_update(None, "user_version", 3_i64)
             .unwrap();
         let error = store.migrate().unwrap_err();
         assert!(error.to_string().contains("newer"), "{error}");
@@ -789,7 +826,7 @@ mod tests {
 
     #[test]
     fn insert_all_adds_each_row_as_its_own_application() {
-        let mut store = memory();
+        let store = memory();
         let snapshot = store
             .insert_all(&[
                 add("Acme", "Backend", Stage::Applied, day(1)),
@@ -807,7 +844,7 @@ mod tests {
 
     #[test]
     fn insert_all_rolls_back_when_a_later_row_is_invalid() {
-        let mut store = memory();
+        let store = memory();
         let error = store
             .insert_all(&[
                 add("Acme", "Backend", Stage::Applied, day(1)),
@@ -816,6 +853,88 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("company is empty"), "{error}");
         assert!(store.load().unwrap().applications.is_empty());
+    }
+
+    #[test]
+    fn a_later_stage_keeps_applied_on_and_moves_since() {
+        let mut store = memory();
+        let created = store
+            .apply(add("Acme", "Backend", Stage::Applied, day(1)))
+            .unwrap();
+        let id = created.applications[0].id;
+        assert_eq!(created.applications[0].applied_on, day(1));
+        let staged = store
+            .apply(Op::SetStage {
+                application_id: id,
+                stage: Stage::FirstMeeting,
+                on: day(14),
+            })
+            .unwrap();
+        let app = &staged.applications[0];
+        assert_eq!(app.applied_on, day(1));
+        assert_eq!(app.current().unwrap().occurred_on, day(14));
+    }
+
+    #[test]
+    fn editing_the_earliest_event_moves_applied_on() {
+        let mut store = memory();
+        let created = store
+            .apply(add("Acme", "Backend", Stage::Applied, day(1)))
+            .unwrap();
+        let id = created.applications[0].id;
+        let earliest = created.applications[0].events[0].id;
+        let with_second = store
+            .apply(Op::SetStage {
+                application_id: id,
+                stage: Stage::FirstMeeting,
+                on: day(14),
+            })
+            .unwrap();
+        let later = with_second.applications[0].current().unwrap().id;
+
+        let amended = store
+            .apply(Op::AmendEvent {
+                event_id: earliest,
+                stage: Stage::Applied,
+                on: day(20),
+            })
+            .unwrap();
+        assert_eq!(amended.applications[0].applied_on, day(14));
+
+        let deleted = store.apply(Op::DeleteEvent { event_id: later }).unwrap();
+        assert_eq!(deleted.applications[0].applied_on, day(20));
+        assert_eq!(deleted.applications[0].events.len(), 1);
+    }
+
+    #[test]
+    fn version_1_database_backfills_applied_on() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1_i64).unwrap();
+        conn.execute(
+            "INSERT INTO applications (company, role) VALUES ('Acme', 'Backend')",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO stage_events (application_id, stage, occurred_on)
+             VALUES (?1, 'first_meeting', '2026-11-14')",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stage_events (application_id, stage, occurred_on)
+             VALUES (?1, 'applied', '2026-11-01')",
+            [id],
+        )
+        .unwrap();
+
+        let store = SqliteStore::from_configured(conn, false).unwrap();
+        assert_eq!(user_version(&store.conn).unwrap(), 2);
+        let app = &store.load().unwrap().applications[0];
+        assert_eq!(app.applied_on, day(1));
+        assert_eq!(app.current().unwrap().occurred_on, day(14));
     }
 
     #[test]

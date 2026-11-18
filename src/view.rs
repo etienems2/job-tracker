@@ -17,6 +17,7 @@ enum Field {
     Company,
     Role,
     Stage,
+    AppliedOn,
     Since,
 }
 
@@ -27,6 +28,7 @@ impl Field {
             Field::Company => "Company",
             Field::Role => "Role",
             Field::Stage => "Stage",
+            Field::AppliedOn => "Applied On",
             Field::Since => "Since",
         }
     }
@@ -42,9 +44,10 @@ impl Field {
                 }
                 None => Cell::from("-"),
             },
+            Field::AppliedOn => Cell::from(short_date(app.applied_on)),
             Field::Since => Cell::from(
                 app.current()
-                    .map(|event| event.occurred_on.strftime("%m-%d").to_string())
+                    .map(|event| short_date(event.occurred_on))
                     .unwrap_or_default(),
             ),
         }
@@ -59,7 +62,7 @@ struct Spec {
     flex: bool,
 }
 
-fn field_specs() -> [Spec; 5] {
+fn field_specs() -> [Spec; 6] {
     [
         Spec {
             field: Field::Id,
@@ -87,6 +90,13 @@ fn field_specs() -> [Spec; 5] {
             min: 10,
             max: 18,
             priority: 5,
+            flex: false,
+        },
+        Spec {
+            field: Field::AppliedOn,
+            min: 10,
+            max: 10,
+            priority: 4,
             flex: false,
         },
         Spec {
@@ -219,12 +229,8 @@ fn draw_table(frame: &mut Frame, model: &mut Model, area: Rect) {
         return;
     }
 
-    let header = Row::new(
-        plan.iter()
-            .map(|(field, _)| field.header())
-            .collect::<Vec<_>>(),
-    )
-    .style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new(plan.iter().map(|(field, _)| field.header()))
+        .style(Style::new().add_modifier(Modifier::BOLD));
     let widths: Vec<Constraint> = plan
         .iter()
         .map(|(_, width)| Constraint::Length(*width))
@@ -233,11 +239,7 @@ fn draw_table(frame: &mut Frame, model: &mut Model, area: Rect) {
         .iter()
         .map(|&index| {
             let app = &model.apps[index];
-            Row::new(
-                plan.iter()
-                    .map(|(field, _)| field.cell(app))
-                    .collect::<Vec<_>>(),
-            )
+            Row::new(plan.iter().map(|(field, _)| field.cell(app)))
         })
         .collect();
     let table = Table::new(rows, widths)
@@ -267,6 +269,7 @@ fn detail_text(app: &Application) -> Text<'static> {
             .style(Style::new().add_modifier(Modifier::BOLD)),
         Line::from(app.role.clone()),
     ];
+    lines.push(Line::from(format!("applied on {}", app.applied_on)));
     if let Some(current) = app.current() {
         lines.push(Line::from(Span::styled(
             current.stage.label(),
@@ -377,6 +380,10 @@ fn draw_status(frame: &mut Frame, model: &Model, area: Rect) {
         Style::new()
     };
     frame.render_widget(Paragraph::new(model.status.as_str()).style(style), area);
+}
+
+fn short_date(date: jiff::civil::Date) -> String {
+    date.strftime("%m-%d").to_string()
 }
 
 fn stage_color(stage: Stage) -> Color {
@@ -530,6 +537,8 @@ mod tests {
         assert!(text.contains("First meeting"), "{text}");
         assert!(text.contains("11-14"), "{text}");
         assert!(text.contains("Stage"), "{text}");
+        assert!(text.contains("Applied On"), "{text}");
+        assert!(text.contains("Since"), "{text}");
         assert!(!text.contains('█'), "{text}");
     }
 
@@ -582,6 +591,7 @@ mod tests {
                 Field::Company,
                 Field::Role,
                 Field::Stage,
+                Field::AppliedOn,
                 Field::Since
             ]
         );
@@ -590,6 +600,7 @@ mod tests {
             .map(|(field, _)| field)
             .collect();
         assert!(tight.contains(&Field::Stage));
+        assert!(tight.contains(&Field::AppliedOn));
         assert!(tight.contains(&Field::Since));
         assert!(!tight.contains(&Field::Id));
     }

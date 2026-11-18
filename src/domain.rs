@@ -118,6 +118,12 @@ impl Stage {
     }
 }
 
+fn cmp_events(left: &StageEvent, right: &StageEvent) -> Ordering {
+    left.occurred_on
+        .cmp(&right.occurred_on)
+        .then(left.id.cmp(&right.id))
+}
+
 fn stage_matches(stage: Stage, input: &str) -> bool {
     let token = stage.token();
     token.starts_with(input) || token.split('_').any(|part| part.starts_with(input))
@@ -135,27 +141,29 @@ pub(crate) struct Application {
     pub(crate) id: i64,
     pub(crate) company: String,
     pub(crate) role: String,
+    /// Date of the earliest stage event, stored on the application as well.
+    pub(crate) applied_on: Date,
     pub(crate) events: Vec<StageEvent>,
 }
 
 impl Application {
-    pub(crate) fn new(id: i64, company: String, role: String, events: Vec<StageEvent>) -> Self {
-        let mut app = Self {
+    pub(crate) fn new(id: i64, company: String, role: String, mut events: Vec<StageEvent>) -> Self {
+        events.sort_by(cmp_events);
+        let applied_on = events
+            .first()
+            .map(|event| event.occurred_on)
+            .unwrap_or(Date::MIN);
+        Self {
             id,
             company,
             role,
+            applied_on,
             events,
-        };
-        app.sort_events();
-        app
+        }
     }
 
     pub(crate) fn sort_events(&mut self) {
-        self.events.sort_by(|left, right| {
-            left.occurred_on
-                .cmp(&right.occurred_on)
-                .then(left.id.cmp(&right.id))
-        });
+        self.events.sort_by(cmp_events);
     }
 
     pub(crate) fn current(&self) -> Option<&StageEvent> {

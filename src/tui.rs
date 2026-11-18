@@ -23,7 +23,7 @@ pub(crate) fn run(
         let today = today();
         if let Some(message) = map_event(event, model.mode, today, width) {
             let effect = update(&mut model, message);
-            dispatch(&mut model, &mut store, effect)?;
+            dispatch(&mut model, &mut store, effect);
         }
     }
     Ok(())
@@ -148,16 +148,12 @@ fn map_help(code: KeyCode) -> Option<Message> {
     }
 }
 
-fn dispatch(
-    model: &mut Model,
-    store: &mut SqliteStore,
-    effect: Effect,
-) -> Result<(), crate::store::StoreError> {
+fn dispatch(model: &mut Model, store: &mut SqliteStore, effect: Effect) {
     match effect {
-        Effect::None | Effect::Quit => Ok(()),
+        Effect::None | Effect::Quit => {}
         Effect::Apply(op) => {
             let previous = match &op {
-                Op::DeleteEvent { event_id } => parent_application(model, *event_id),
+                Op::DeleteEvent { event_id } => application_id(&model.apps, *event_id),
                 _ => None,
             };
             match store.apply(op.clone()) {
@@ -171,34 +167,21 @@ fn dispatch(
                             focus,
                         },
                     );
-                    Ok(())
                 }
                 Err(error) => {
                     update(model, Message::Failed(error.to_string()));
-                    Ok(())
                 }
             }
         }
-        Effect::Export(path) => {
-            match write_export(store, &path) {
-                Ok(message) => {
-                    update(model, Message::Status(message));
-                }
-                Err(message) => {
-                    update(model, Message::Failed(message));
-                }
+        Effect::Export(path) => match write_export(store, &path) {
+            Ok(message) => {
+                update(model, Message::Status(message));
             }
-            Ok(())
-        }
+            Err(message) => {
+                update(model, Message::Failed(message));
+            }
+        },
     }
-}
-
-fn parent_application(model: &Model, event_id: i64) -> Option<i64> {
-    model
-        .apps
-        .iter()
-        .find(|app| app.events.iter().any(|event| event.id == event_id))
-        .map(|app| app.id)
 }
 
 fn outcome(
@@ -213,7 +196,7 @@ fn outcome(
             Some(*application_id)
         }
         Op::Delete { .. } => None,
-        Op::AmendEvent { event_id, .. } => application_id_for_event(snapshot, *event_id),
+        Op::AmendEvent { event_id, .. } => application_id(&snapshot.applications, *event_id),
         Op::DeleteEvent { .. } => previous_app,
     };
     let mut status = match op {
@@ -236,10 +219,8 @@ fn outcome(
     (status, focus)
 }
 
-fn application_id_for_event(snapshot: &Snapshot, event_id: i64) -> Option<i64> {
-    snapshot
-        .applications
-        .iter()
+fn application_id(apps: &[crate::domain::Application], event_id: i64) -> Option<i64> {
+    apps.iter()
         .find(|app| app.events.iter().any(|event| event.id == event_id))
         .map(|app| app.id)
 }
@@ -279,7 +260,7 @@ mod tests {
             stage: Stage::Applied,
             on: day(1),
         });
-        dispatch(&mut model, &mut store, effect).unwrap();
+        dispatch(&mut model, &mut store, effect);
         assert_eq!(model.apps.len(), 1);
         assert_eq!(model.apps[0].company, "Acme");
         assert_eq!(model.selected_id(), Some(model.apps[0].id));
@@ -295,8 +276,7 @@ mod tests {
             &mut model,
             &mut store,
             Effect::Apply(Op::Delete { application_id: 99 }),
-        )
-        .unwrap();
+        );
         assert!(model.apps.is_empty());
         assert!(model.status_error);
         assert!(model.status.contains("no application 99"));
@@ -315,8 +295,7 @@ mod tests {
                 stage: Stage::Refused,
                 on: day(1),
             }),
-        )
-        .unwrap();
+        );
         assert_eq!(model.apps.len(), 1);
         assert!(model.selected_id().is_none());
         assert!(model.status.contains("hidden by the current filter"));
@@ -336,14 +315,13 @@ mod tests {
                 stage: Stage::Applied,
                 on: day(1),
             }),
-        )
-        .unwrap();
+        );
         let path = std::env::temp_dir().join(format!(
             "job-tracker-export-{}-{}.json",
             std::process::id(),
             model.apps[0].id
         ));
-        dispatch(&mut model, &mut store, Effect::Export(path.clone())).unwrap();
+        dispatch(&mut model, &mut store, Effect::Export(path.clone()));
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(json.contains("Acme"), "{json}");
         assert!(model.status.contains("exported"));

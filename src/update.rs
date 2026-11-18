@@ -159,14 +159,16 @@ pub(crate) fn update(model: &mut Model, message: Message) -> Effect {
 }
 
 fn move_selection(model: &mut Model, delta: i32) {
-    let count = model.visible_indices().len();
-    if count == 0 {
+    let Some(last) = model.visible_indices().len().checked_sub(1) else {
         model.sync_table();
         return;
-    }
-    let next = model.selection as i64 + i64::from(delta);
-    let last = count as i64 - 1;
-    model.selection = next.clamp(0, last) as usize;
+    };
+    let steps = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    model.selection = if delta < 0 {
+        model.selection.saturating_sub(steps)
+    } else {
+        model.selection.saturating_add(steps).min(last)
+    };
     model.sync_table();
 }
 
