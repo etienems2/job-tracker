@@ -17,8 +17,8 @@ enum Field {
     Company,
     Role,
     Stage,
-    AppliedOn,
     Since,
+    AppliedOn,
 }
 
 impl Field {
@@ -28,8 +28,8 @@ impl Field {
             Field::Company => "Company",
             Field::Role => "Role",
             Field::Stage => "Stage",
-            Field::AppliedOn => "Applied On",
             Field::Since => "Since",
+            Field::AppliedOn => "Applied On",
         }
     }
 
@@ -44,12 +44,12 @@ impl Field {
                 }
                 None => Cell::from("-"),
             },
-            Field::AppliedOn => Cell::from(short_date(app.applied_on)),
             Field::Since => Cell::from(
                 app.current()
                     .map(|event| short_date(event.occurred_on))
                     .unwrap_or_default(),
             ),
+            Field::AppliedOn => Cell::from(short_date(app.applied_on)),
         }
     }
 }
@@ -93,16 +93,16 @@ fn field_specs() -> [Spec; 6] {
             flex: false,
         },
         Spec {
-            field: Field::AppliedOn,
-            min: 10,
-            max: 10,
+            field: Field::Since,
+            min: 5,
+            max: 6,
             priority: 4,
             flex: false,
         },
         Spec {
-            field: Field::Since,
-            min: 5,
-            max: 6,
+            field: Field::AppliedOn,
+            min: 10,
+            max: 10,
             priority: 4,
             flex: false,
         },
@@ -269,7 +269,6 @@ fn detail_text(app: &Application) -> Text<'static> {
             .style(Style::new().add_modifier(Modifier::BOLD)),
         Line::from(app.role.clone()),
     ];
-    lines.push(Line::from(format!("applied on {}", app.applied_on)));
     if let Some(current) = app.current() {
         lines.push(Line::from(Span::styled(
             current.stage.label(),
@@ -277,6 +276,7 @@ fn detail_text(app: &Application) -> Text<'static> {
         )));
         lines.push(Line::from(format!("since {}", current.occurred_on)));
     }
+    lines.push(Line::from(format!("applied on {}", app.applied_on)));
     lines.push(Line::from(""));
     lines.push(Line::from("Events").style(Style::new().add_modifier(Modifier::BOLD)));
     for event in &app.events {
@@ -591,8 +591,8 @@ mod tests {
                 Field::Company,
                 Field::Role,
                 Field::Stage,
-                Field::AppliedOn,
-                Field::Since
+                Field::Since,
+                Field::AppliedOn
             ]
         );
         let tight: Vec<_> = column_plan(32)
